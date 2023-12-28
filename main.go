@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/template/html/v2"
@@ -13,39 +14,71 @@ import (
 	helper "github.com/omjogani/postgre-multipartitions/helpers"
 )
 
-func indexHandler(c *fiber.Ctx, db *sql.DB) error {
-	var stockName string
-	var stocks []string
+type Stock struct {
+	Name  string
+	Price float64
+}
 
-	rows, err := db.Query("SELECT name FROM stocks")
+func fetchRecords(db *sql.DB) []Stock {
+	var stocksMaster0 []Stock
+
+	// load From Master 0
+	rowsMaster0, err := db.Query("SELECT name, price FROM stocks")
 	if err != nil {
 		log.Fatalln(err)
-		return c.JSON("An error occurred")
+		return stocksMaster0
 	}
 
-	defer rows.Close()
+	defer rowsMaster0.Close()
 
-	for rows.Next() {
-		err = rows.Scan(&stockName)
+	for rowsMaster0.Next() {
+		var stock Stock
+		err = rowsMaster0.Scan(&stock.Name, &stock.Price)
 		if err != nil {
 			log.Println("Error scanning row:", err)
 			continue
 		}
-		stocks = append(stocks, stockName)
+		stocksMaster0 = append(stocksMaster0, stock)
 	}
 
+	return stocksMaster0
+}
+
+func postHandler(c *fiber.Ctx, db []*sql.DB) error {
+	newStock := Stock{}
+	if err := c.BodyParser(&newStock); err != nil {
+		log.Printf("An Error: %v", err)
+		return c.SendString(err.Error())
+	}
+	fmt.Printf("%v", newStock)
+	if newStock.Name != "" {
+
+		if strings.ToLower(newStock.Name)[0] >= 'a' && strings.ToLower(newStock.Name)[0] <= 'm' {
+			_, errorQuery := db[0].Exec("INSERT into stocks VALUES ($1, $2)", newStock.Name, newStock.Price)
+			if errorQuery != nil {
+				log.Fatalf("An error while executing query: %v", errorQuery)
+			}
+		} else {
+			_, errorQuery := db[1].Exec("INSERT into stocks VALUES ($1, $2)", newStock.Name, newStock.Price)
+			if errorQuery != nil {
+				log.Fatalf("An error while executing query: %v", errorQuery)
+			}
+		}
+
+	}
+	return c.Redirect("/")
+}
+
+func indexHandler(c *fiber.Ctx, db []*sql.DB) error {
+	stocksMaster0 := fetchRecords(db[0])
+	stocksMaster1 := fetchRecords(db[1])
 	return c.Render("index", fiber.Map{
-		"Stocks": stocks,
+		"M0Stocks": stocksMaster0,
+		"M1Stocks": stocksMaster1,
 	})
 }
 
-func navigateRequest(c *fiber.Ctx, db []*sql.DB) error {
-	return indexHandler(c, db[0])
-}
-
 func main() {
-	fmt.Println("PostgreSQL Multi-Partitions")
-
 	engine := html.New("./views", ".html")
 	app := fiber.New(fiber.Config{
 		Views: engine,
@@ -72,12 +105,15 @@ func main() {
 	dbConnections = append(dbConnections, helper.ConnectToDb(connStrMaster1))
 
 	app.Get("/", func(c *fiber.Ctx) error {
-		return navigateRequest(c, dbConnections)
+		return indexHandler(c, dbConnections)
+	})
+
+	app.Post("/", func(c *fiber.Ctx) error {
+		return postHandler(c, dbConnections)
 	})
 
 	if port == "" {
 		port = "3000"
 	}
-	app.Static("/", "./public")
 	log.Fatalln(app.Listen(fmt.Sprintf(":%v", port)))
 }
